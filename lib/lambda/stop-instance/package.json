@@ -1,0 +1,9 @@
+{
+  "name": "stop-instance",
+  "version": "1.0.0",
+  "description": "Lambda function to stop an EC2 instance",
+  "main": "index.js",
+  "dependencies": {
+    "aws-sdk": "^2.1499.0"
+  }
+}

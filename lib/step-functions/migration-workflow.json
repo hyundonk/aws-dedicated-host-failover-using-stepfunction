@@ -1,0 +1,439 @@
+{
+  "Comment": "EC2 Dedicated Host Migration Workflow",
+  "StartAt": "InitializeMigration",
+  "States": {
+    "InitializeMigration": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${InitializeMigrationFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId"
+        }
+      },
+      "ResultPath": "$.initResult",
+      "Next": "CheckReservedHostAvailability"
+    },
+    "CheckReservedHostAvailability": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CheckReservedHostFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId"
+        }
+      },
+      "ResultPath": "$.reservedHostResult",
+      "Next": "IsReservedHostAvailable"
+    },
+    "IsReservedHostAvailable": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.reservedHostResult.Payload.isAvailable",
+          "BooleanEquals": true,
+          "Next": "GetInstancesOnFailingHost"
+        }
+      ],
+      "Default": "ProvisionReservedHost"
+    },
+    "ProvisionReservedHost": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ProvisionReservedHostFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "availabilityZone": "${AvailabilityZone}",
+          "instanceType": "${InstanceType}"
+        }
+      },
+      "ResultPath": "$.provisionResult",
+      "Next": "SendProvisionNotification",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "HandleProvisionFailure"
+        }
+      ]
+    },
+    "HandleProvisionFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "status": "failed",
+          "error.$": "$.error"
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "PrepareProvisionFailureMessage"
+    },
+    "PrepareProvisionFailureMessage": {
+      "Type": "Pass",
+      "Parameters": {
+        "message": "Failed to provision a reserved host for failover. Please check the logs for more details."
+      },
+      "Next": "SendFailureNotification"
+    },
+    "SendProvisionNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${AlertTopicArn}",
+        "Subject": "EC2 Dedicated Host Failover - New Host Provisioned",
+        "Message.$": "States.Format('Provisioned new reserved host {} for failover of {}', $.provisionResult.Payload.reservedHostId, $.hostId)"
+      },
+      "Next": "GetInstancesOnFailingHost"
+    },
+    "GetInstancesOnFailingHost": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${GetInstancesFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "reservedHostId.$": "$.reservedHostResult.Payload.reservedHostId"
+        }
+      },
+      "ResultPath": "$.instances",
+      "Next": "CheckInstancesExist"
+    },
+    "CheckInstancesExist": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.instances.Payload.hasInstances",
+          "BooleanEquals": true,
+          "Next": "PrepareInstanceMigration"
+        }
+      ],
+      "Default": "NoInstancesToMigrate"
+    },
+    "NoInstancesToMigrate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "status": "complete"
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "SendNoInstancesNotification"
+    },
+    "SendNoInstancesNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${AlertTopicArn}",
+        "Subject": "EC2 Dedicated Host Failover - No Instances",
+        "Message.$": "States.Format('No instances found on dedicated host {}', $.hostId)"
+      },
+      "Next": "MigrationComplete"
+    },
+    "PrepareInstanceMigration": {
+      "Type": "Pass",
+      "Parameters": {
+        "index": 0,
+        "totalInstances.$": "States.ArrayLength($.instances.Payload.instanceIds)",
+        "failedInstances": [],
+        "reservedHostId.$": "$.instances.Payload.reservedHostId",
+        "hostId.$": "$.hostId"
+      },
+      "ResultPath": "$.migrationState",
+      "Next": "InstanceMigrationIterator"
+    },
+    "InstanceMigrationIterator": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.migrationState.index",
+          "NumericLessThan": 100,
+          "Next": "CheckIndexAgainstTotal"
+        }
+      ],
+      "Default": "EvaluateMigrationResults"
+    },
+    "CheckIndexAgainstTotal": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.migrationState.index",
+          "NumericLessThanPath": "$.migrationState.totalInstances",
+          "Next": "ExtractCurrentInstanceId"
+        }
+      ],
+      "Default": "EvaluateMigrationResults"
+    },
+    "ExtractCurrentInstanceId": {
+      "Type": "Pass",
+      "Parameters": {
+        "instanceId.$": "States.ArrayGetItem($.instances.Payload.instanceIds, $.migrationState.index)"
+      },
+      "ResultPath": "$.currentInstance",
+      "Next": "StopInstance"
+    },
+    "StopInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${StopInstanceFunction}",
+        "Payload": {
+          "instanceId.$": "$.currentInstance.instanceId",
+          "reservedHostId.$": "$.migrationState.reservedHostId"
+        }
+      },
+      "ResultPath": "$.stopResult",
+      "Next": "WaitForInstanceToStop",
+      "Retry": [
+        {
+          "ErrorEquals": ["InstanceStopError"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "HandleInstanceMigrationFailure"
+        }
+      ]
+    },
+    "WaitForInstanceToStop": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "CheckInstanceStopped"
+    },
+    "CheckInstanceStopped": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CheckInstanceStateFunction}",
+        "Payload": {
+          "instanceId.$": "$.currentInstance.instanceId",
+          "expectedState": "stopped",
+          "reservedHostId.$": "$.migrationState.reservedHostId"
+        }
+      },
+      "ResultPath": "$.instanceState",
+      "Next": "IsInstanceStopped"
+    },
+    "IsInstanceStopped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.instanceState.Payload.inExpectedState",
+          "BooleanEquals": true,
+          "Next": "ModifyInstancePlacement"
+        }
+      ],
+      "Default": "WaitForInstanceToStop"
+    },
+    "ModifyInstancePlacement": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ModifyPlacementFunction}",
+        "Payload": {
+          "instanceId.$": "$.currentInstance.instanceId",
+          "reservedHostId.$": "$.migrationState.reservedHostId"
+        }
+      },
+      "ResultPath": "$.placementResult",
+      "Next": "StartInstance",
+      "Retry": [
+        {
+          "ErrorEquals": ["PlacementError"],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 3,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "HandleInstanceMigrationFailure"
+        }
+      ]
+    },
+    "StartInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${StartInstanceFunction}",
+        "Payload": {
+          "instanceId.$": "$.currentInstance.instanceId",
+          "reservedHostId.$": "$.migrationState.reservedHostId"
+        }
+      },
+      "ResultPath": "$.startResult",
+      "Next": "WaitForInstanceToStart",
+      "Retry": [
+        {
+          "ErrorEquals": ["InstanceStartError"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "HandleInstanceMigrationFailure"
+        }
+      ]
+    },
+    "WaitForInstanceToStart": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "CheckInstanceStarted"
+    },
+    "CheckInstanceStarted": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CheckInstanceStateFunction}",
+        "Payload": {
+          "instanceId.$": "$.currentInstance.instanceId",
+          "expectedState": "running",
+          "reservedHostId.$": "$.migrationState.reservedHostId"
+        }
+      },
+      "ResultPath": "$.instanceState",
+      "Next": "IsInstanceStarted"
+    },
+    "IsInstanceStarted": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.instanceState.Payload.inExpectedState",
+          "BooleanEquals": true,
+          "Next": "IncrementInstanceCounter"
+        }
+      ],
+      "Default": "WaitForInstanceToStart"
+    },
+    "HandleInstanceMigrationFailure": {
+      "Type": "Pass",
+      "Parameters": {
+        "index.$": "$.migrationState.index",
+        "totalInstances.$": "$.migrationState.totalInstances",
+        "failedInstances.$": "States.Array($.migrationState.failedInstances, $.currentInstance.instanceId)",
+        "reservedHostId.$": "$.migrationState.reservedHostId",
+        "hostId.$": "$.migrationState.hostId",
+        "failed": true
+      },
+      "ResultPath": "$.migrationState",
+      "Next": "IncrementInstanceCounter"
+    },
+    "IncrementInstanceCounter": {
+      "Type": "Pass",
+      "Parameters": {
+        "index.$": "States.MathAdd($.migrationState.index, 1)",
+        "totalInstances.$": "$.migrationState.totalInstances",
+        "failedInstances.$": "$.migrationState.failedInstances",
+        "reservedHostId.$": "$.migrationState.reservedHostId",
+        "hostId.$": "$.migrationState.hostId",
+        "failed": false
+      },
+      "ResultPath": "$.migrationState",
+      "Next": "InstanceMigrationIterator"
+    },
+    "EvaluateMigrationResults": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.migrationState.failed",
+          "BooleanEquals": true,
+          "Next": "MigrationPartiallyFailed"
+        }
+      ],
+      "Default": "MigrationSuccessful"
+    },
+    "MigrationSuccessful": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "status": "complete",
+          "expirationTime": true
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "RemoveReservedTag"
+    },
+    "RemoveReservedTag": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${RemoveReservedTagFunction}",
+        "Payload": {
+          "reservedHostId.$": "$.migrationState.reservedHostId"
+        }
+      },
+      "ResultPath": "$.tagRemovalResult",
+      "Next": "PrepareSuccessMessage"
+    },
+    "PrepareSuccessMessage": {
+      "Type": "Pass",
+      "Parameters": {
+        "message.$": "States.Format('Successfully migrated all instances from dedicated host {} to {}', $.hostId, $.migrationState.reservedHostId)"
+      },
+      "Next": "SendSuccessNotification"
+    },
+    "SendSuccessNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${AlertTopicArn}",
+        "Subject": "EC2 Dedicated Host Failover - Migration Successful",
+        "Message.$": "$.message"
+      },
+      "Next": "MigrationComplete"
+    },
+    "MigrationPartiallyFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "status": "failed"
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "PrepareFailureMessage"
+    },
+    "PrepareFailureMessage": {
+      "Type": "Pass",
+      "Parameters": {
+        "message.$": "States.Format('Failed to migrate some instances from dedicated host {} to {}. Failed instances: {}', $.hostId, $.migrationState.reservedHostId, States.JsonToString($.migrationState.failedInstances))"
+      },
+      "Next": "SendFailureNotification"
+    },
+    "SendFailureNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${AlertTopicArn}",
+        "Subject": "EC2 Dedicated Host Failover - Migration Failed",
+        "Message.$": "$.message"
+      },
+      "Next": "MigrationComplete"
+    },
+    "MigrationComplete": {
+      "Type": "Succeed"
+    }
+  }
+}

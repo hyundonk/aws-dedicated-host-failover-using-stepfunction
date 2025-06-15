@@ -1,0 +1,9 @@
+{
+  "name": "provision-reserved-host",
+  "version": "1.0.0",
+  "description": "Lambda function to provision a reserved EC2 dedicated host",
+  "main": "index.js",
+  "dependencies": {
+    "aws-sdk": "^2.1499.0"
+  }
+}

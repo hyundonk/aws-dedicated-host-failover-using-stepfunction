@@ -1,0 +1,9 @@
+{
+  "name": "ec2-utils",
+  "version": "1.0.0",
+  "description": "Common utilities for EC2 host migration",
+  "main": "ec2-utils.js",
+  "dependencies": {
+    "aws-sdk": "^2.1499.0"
+  }
+}

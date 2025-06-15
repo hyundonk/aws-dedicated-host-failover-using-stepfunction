@@ -1,0 +1,9 @@
+{
+  "name": "start-instance",
+  "version": "1.0.0",
+  "description": "Lambda function to start an EC2 instance",
+  "main": "index.js",
+  "dependencies": {
+    "aws-sdk": "^2.1499.0"
+  }
+}

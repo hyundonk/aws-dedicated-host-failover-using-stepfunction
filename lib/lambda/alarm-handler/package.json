@@ -1,0 +1,9 @@
+{
+  "name": "alarm-handler",
+  "version": "1.0.0",
+  "description": "Lambda function to handle CloudWatch alarms for dedicated host failures",
+  "main": "index.js",
+  "dependencies": {
+    "aws-sdk": "^2.1499.0"
+  }
+}

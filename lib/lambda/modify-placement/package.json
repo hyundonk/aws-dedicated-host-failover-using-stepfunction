@@ -1,0 +1,9 @@
+{
+  "name": "modify-placement",
+  "version": "1.0.0",
+  "description": "Lambda function to modify EC2 instance placement",
+  "main": "index.js",
+  "dependencies": {
+    "aws-sdk": "^2.1499.0"
+  }
+}
