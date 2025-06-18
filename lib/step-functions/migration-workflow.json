@@ -213,7 +213,7 @@
       "Parameters": {
         "stopCheckCounter": 0
       },
-      "ResultPath": "$.stopCheckCounter",
+      "ResultPath": "$",
       "Next": "WaitForInstanceToStop"
     },
     "WaitForInstanceToStop": {
@@ -249,9 +249,16 @@
     "IncrementStopCounter": {
       "Type": "Pass",
       "Parameters": {
-        "stopCheckCounter.$": "States.MathAdd($.stopCheckCounter, 1)"
+        "stopCheckCounter.$": "States.MathAdd($.stopCheckCounter, 1)",
+        "hostId.$": "$.hostId",
+        "currentInstance.$": "$.currentInstance",
+        "instanceState.$": "$.instanceState",
+        "migrationState.$": "$.migrationState",
+        "instances.$": "$.instances",
+        "initResult.$": "$.initResult",
+        "reservedHostResult.$": "$.reservedHostResult"
       },
-      "ResultPath": "$.stopCheckCounter",
+      "ResultPath": "$",
       "Next": "CheckStopRetryCount"
     },
     "CheckStopRetryCount": {
