@@ -173,7 +173,8 @@
     "ExtractCurrentInstanceId": {
       "Type": "Pass",
       "Parameters": {
-        "instanceId.$": "States.ArrayGetItem($.instances.Payload.instanceIds, $.migrationState.index)"
+        "instanceId.$": "States.ArrayGetItem($.instances.Payload.instanceIds, $.migrationState.index)",
+        "forceStop": false
       },
       "ResultPath": "$.currentInstance",
       "Next": "StopInstance"
@@ -185,11 +186,12 @@
         "FunctionName": "${StopInstanceFunction}",
         "Payload": {
           "instanceId.$": "$.currentInstance.instanceId",
-          "reservedHostId.$": "$.migrationState.reservedHostId"
+          "reservedHostId.$": "$.migrationState.reservedHostId",
+          "force.$": "$.currentInstance.forceStop"
         }
       },
       "ResultPath": "$.stopResult",
-      "Next": "WaitForInstanceToStop",
+      "Next": "InitializeStopCounter",
       "Retry": [
         {
           "ErrorEquals": ["InstanceStopError"],
@@ -205,6 +207,14 @@
           "Next": "HandleInstanceMigrationFailure"
         }
       ]
+    },
+    "InitializeStopCounter": {
+      "Type": "Pass",
+      "Parameters": {
+        "stopCheckCounter": 0
+      },
+      "ResultPath": "$.stopCheckCounter",
+      "Next": "WaitForInstanceToStop"
     },
     "WaitForInstanceToStop": {
       "Type": "Wait",
@@ -234,7 +244,35 @@
           "Next": "ModifyInstancePlacement"
         }
       ],
+      "Default": "IncrementStopCounter"
+    },
+    "IncrementStopCounter": {
+      "Type": "Pass",
+      "Parameters": {
+        "stopCheckCounter.$": "States.MathAdd($.stopCheckCounter, 1)"
+      },
+      "ResultPath": "$.stopCheckCounter",
+      "Next": "CheckStopRetryCount"
+    },
+    "CheckStopRetryCount": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.stopCheckCounter",
+          "NumericEquals": 4,
+          "Next": "PrepareForceStop"
+        }
+      ],
       "Default": "WaitForInstanceToStop"
+    },
+    "PrepareForceStop": {
+      "Type": "Pass",
+      "Parameters": {
+        "instanceId.$": "$.currentInstance.instanceId",
+        "forceStop": true
+      },
+      "ResultPath": "$.currentInstance",
+      "Next": "StopInstance"
     },
     "ModifyInstancePlacement": {
       "Type": "Task",

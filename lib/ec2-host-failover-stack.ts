@@ -129,6 +129,7 @@ export class EC2HostFailoverStack extends cdk.Stack {
         'ec2:StartInstances',
         'ec2:ModifyInstancePlacement',
         'ec2:CreateTags',
+        'ec2:ForceStopInstances',
       ],
       resources: ['*'],
     });
