@@ -34,6 +34,7 @@ describe('Step Function Definition', () => {
     expect(initCounterState).toBeDefined();
     expect(initCounterState.Type).toBe('Pass');
     expect(initCounterState.Parameters.stopCheckCounter).toBe(0);
+    expect(initCounterState.ResultPath).toBe('$');
   });
   
   it('should have IncrementStopCounter state as default from IsInstanceStopped', () => {
@@ -41,6 +42,16 @@ describe('Step Function Definition', () => {
     
     expect(isStoppedState).toBeDefined();
     expect(isStoppedState.Default).toBe('IncrementStopCounter');
+  });
+  
+  it('should have IncrementStopCounter state that properly increments the counter', () => {
+    const incrementState = stepFunctionDefinition.States.IncrementStopCounter;
+    
+    expect(incrementState).toBeDefined();
+    expect(incrementState.Type).toBe('Pass');
+    expect(incrementState.Parameters['stopCheckCounter.$']).toBe('States.MathAdd($.stopCheckCounter, 1)');
+    expect(incrementState.ResultPath).toBe('$');
+    expect(incrementState.Next).toBe('CheckStopRetryCount');
   });
   
   it('should have CheckStopRetryCount state that checks for 4 attempts', () => {
