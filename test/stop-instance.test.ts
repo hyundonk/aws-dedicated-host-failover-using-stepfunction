@@ -57,8 +57,10 @@ describe('stop-instance Lambda function', () => {
   });
   
   it('should throw an error for invalid instance ID', async () => {
+    // Using type assertion to bypass TypeScript check for test purposes
+    // This is intentional as we're testing the runtime validation
     const event = {
-      instanceId: null,
+      instanceId: null as unknown as string,
       reservedHostId: 'h-12345'
     };
     

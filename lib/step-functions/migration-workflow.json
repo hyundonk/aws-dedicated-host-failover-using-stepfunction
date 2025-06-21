@@ -211,7 +211,8 @@
     "InitializeStopCounter": {
       "Type": "Pass",
       "Parameters": {
-        "stopCheckCounter": 0
+        "counter": 0,
+        "forceStopApplied": false
       },
       "ResultPath": "$.stopCheckCounter",
       "Next": "WaitForInstanceToStop"
@@ -249,18 +250,44 @@
     "IncrementStopCounter": {
       "Type": "Pass",
       "Parameters": {
-        "stopCheckCounter.$": "States.MathAdd($.stopCheckCounter, 1)"
+        "stopCheckCounter": {
+          "counter.$": "States.MathAdd($.stopCheckCounter.counter, 1)",
+          "forceStopApplied.$": "$.stopCheckCounter.forceStopApplied"
+        },
+        "hostId.$": "$.hostId",
+        "currentInstance.$": "$.currentInstance",
+        "instanceState.$": "$.instanceState",
+        "migrationState.$": "$.migrationState",
+        "instances.$": "$.instances",
+        "initResult.$": "$.initResult",
+        "reservedHostResult.$": "$.reservedHostResult"
       },
-      "ResultPath": "$.stopCheckCounter",
+      "ResultPath": "$",
       "Next": "CheckStopRetryCount"
     },
     "CheckStopRetryCount": {
       "Type": "Choice",
       "Choices": [
         {
-          "Variable": "$.stopCheckCounter",
-          "NumericEquals": 4,
+          "Variable": "$.stopCheckCounter.forceStopApplied",
+          "BooleanEquals": true,
+          "Next": "CheckForceStopRetryLimit"
+        },
+        {
+          "Variable": "$.stopCheckCounter.counter",
+          "NumericEquals": 2,
           "Next": "PrepareForceStop"
+        }
+      ],
+      "Default": "WaitForInstanceToStop"
+    },
+    "CheckForceStopRetryLimit": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.stopCheckCounter.counter",
+          "NumericEquals": 6,
+          "Next": "HandleInstanceMigrationFailure"
         }
       ],
       "Default": "WaitForInstanceToStop"
@@ -272,6 +299,15 @@
         "forceStop": true
       },
       "ResultPath": "$.currentInstance",
+      "Next": "UpdateForceStopFlag"
+    },
+    "UpdateForceStopFlag": {
+      "Type": "Pass",
+      "Parameters": {
+        "counter": 2,
+        "forceStopApplied": true
+      },
+      "ResultPath": "$.stopCheckCounter",
       "Next": "StopInstance"
     },
     "ModifyInstancePlacement": {
