@@ -214,7 +214,7 @@
         "counter": 0,
         "forceStopApplied": false
       },
-      "ResultPath": "$",
+      "ResultPath": "$.stopCheckCounter",
       "Next": "WaitForInstanceToStop"
     },
     "WaitForInstanceToStop": {
