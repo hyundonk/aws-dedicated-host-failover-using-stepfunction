@@ -113,11 +113,41 @@ export class EC2HostFailoverStack extends cdk.Stack {
       handler: 'index.handler',
     });
 
+    const updateInstanceMigrationStatusFunction = new lambda.Function(this, 'UpdateInstanceMigrationStatusFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/update-instance-migration-status')),
+      handler: 'index.handler',
+    });
+
+    const getMigrationStatusFunction = new lambda.Function(this, 'GetMigrationStatusFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/get-migration-status')),
+      handler: 'index.handler',
+    });
+
+    const prepareDetailedNotificationFunction = new lambda.Function(this, 'PrepareDetailedNotificationFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/prepare-detailed-notification')),
+      handler: 'index.handler',
+    });
+
+    const sendStepNotificationFunction = new lambda.Function(this, 'SendStepNotificationFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/send-step-notification')),
+      handler: 'index.handler',
+    });
+
     // Grant permissions
     queueTable.grantReadWriteData(initializeFunction);
     queueTable.grantReadWriteData(updateStatusFunction);
+    queueTable.grantReadWriteData(updateInstanceMigrationStatusFunction);
+    queueTable.grantReadWriteData(getInstancesFunction);
+    queueTable.grantReadData(getMigrationStatusFunction);
+    queueTable.grantReadData(prepareDetailedNotificationFunction);
+    queueTable.grantReadData(sendStepNotificationFunction);
     alertTopic.grantPublish(initializeFunction);
     alertTopic.grantPublish(updateStatusFunction);
+    alertTopic.grantPublish(sendStepNotificationFunction);
 
     // EC2 permissions
     const ec2Policy = new iam.PolicyStatement({
@@ -168,6 +198,9 @@ export class EC2HostFailoverStack extends cdk.Stack {
         ModifyPlacementFunction: modifyPlacementFunction.functionArn,
         StartInstanceFunction: startInstanceFunction.functionArn,
         UpdateStatusFunction: updateStatusFunction.functionArn,
+        UpdateInstanceMigrationStatusFunction: updateInstanceMigrationStatusFunction.functionArn,
+        PrepareDetailedNotificationFunction: prepareDetailedNotificationFunction.functionArn,
+        SendStepNotificationFunction: sendStepNotificationFunction.functionArn,
         RemoveReservedTagFunction: removeReservedTagFunction.functionArn,
         AlertTopicArn: alertTopic.topicArn,
         AvailabilityZone: props.availabilityZone,
@@ -187,6 +220,9 @@ export class EC2HostFailoverStack extends cdk.Stack {
     modifyPlacementFunction.grantInvoke(stateMachine);
     startInstanceFunction.grantInvoke(stateMachine);
     updateStatusFunction.grantInvoke(stateMachine);
+    updateInstanceMigrationStatusFunction.grantInvoke(stateMachine);
+    prepareDetailedNotificationFunction.grantInvoke(stateMachine);
+    sendStepNotificationFunction.grantInvoke(stateMachine);
     removeReservedTagFunction.grantInvoke(stateMachine);
     
     // Grant the Step Function permission to publish to the SNS topic
@@ -275,6 +311,11 @@ export class EC2HostFailoverStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AlertTopicArn', {
       value: alertTopic.topicArn,
       description: 'SNS topic for migration alerts',
+    });
+
+    new cdk.CfnOutput(this, 'GetMigrationStatusFunctionArn', {
+      value: getMigrationStatusFunction.functionArn,
+      description: 'Lambda function to get detailed migration status',
     });
   }
 }
