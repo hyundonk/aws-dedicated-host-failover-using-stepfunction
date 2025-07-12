@@ -320,12 +320,45 @@ cd ../../..
 
 ### Configuration
 
-Edit the `bin/202506-dh-failover-stepfunction.ts` file to configure:
+The stack now uses environment variables for configuration. Set the following required environment variables before deployment:
 
-- `alertEmail`: Email address to receive notifications
-- `availabilityZone`: Availability zone for reserved hosts
-- `instanceType`: Instance type for reserved hosts
-- `dedicatedHostIds`: (Optional) Array of dedicated host IDs to monitor
+#### Required Environment Variables
+
+```bash
+# Email address to receive notifications
+export ALERT_EMAIL="admin@company.com"
+
+# Availability zone for reserved hosts (must match the region)
+export AVAILABILITY_ZONE="ap-northeast-1a"
+
+# AWS region for deployment
+export AWS_REGION="ap-northeast-1"
+```
+
+#### Optional Configuration
+
+You can also create a `.env` file for easier management:
+
+```bash
+# Copy the example file
+cp .env.example .env
+
+# Edit with your values
+nano .env
+
+# Source the environment variables
+source .env
+```
+
+#### Legacy Configuration (Deprecated)
+
+The old method of editing `bin/202506-dh-failover-stepfunction.ts` directly is no longer recommended. The following values are now configured via environment variables:
+
+- ~~`alertEmail`~~ → Use `ALERT_EMAIL` environment variable
+- ~~`availabilityZone`~~ → Use `AVAILABILITY_ZONE` environment variable  
+- ~~`region`~~ → Use `AWS_REGION` environment variable
+- `instanceType`: Still hardcoded as `c5.large` (can be modified in the file if needed)
+- `dedicatedHostIds`: Still configured in the file (optional)
 
 ### Deploy the Stack
 
