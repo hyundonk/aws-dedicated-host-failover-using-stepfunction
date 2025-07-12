@@ -349,23 +349,31 @@ For production environments where you need more restrictive permissions, use thi
 3. **AWS CDK** installed globally: `npm install -g aws-cdk`
 
 ### Deployment Steps
-```bash
-# 1. Navigate to project directory
-cd /home/ec2-user/workspace/aws-dedicated-host-failover-using-stepfunction
+You can deploy this CDK stack on CloudShell in AWS Console after you get the proper permissions described above.
 
-# 2. Install Lambda layer dependencies
+```bash
+#0. Clone this repo
+git clone https://github.com/hyundonk/aws-dedicated-host-failover-using-stepfunction.git 
+
+# 1. Navigate to project directory
+cd aws-dedicated-host-failover-using-stepfunction/
+
+# 1. Install aws-cdk
+sudo npm install -g aws-cdk
+
+# 3. Install Lambda layer dependencies
 cd lib/lambda-layer/nodejs
 npm install
 cd ../../..
 
-# 3. Install project dependencies
+# 4. Install project dependencies
 npm install
 
-# 4. Build the project
+# 5. Build the project
 npm run build
 
-# 5. Deploy the stack
-cdk deploy --require-approval never --region ap-northeast-1
+# 6. Deploy the stack with environment variables
+ALERT_EMAIL="admin@company.com" AVAILABILITY_ZONE="ap-northeast-2a" AWS_REGION="ap-northeast-2"  cdk deploy
 ```
 
 ### Configuration
