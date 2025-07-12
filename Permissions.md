@@ -376,13 +376,6 @@ npm run build
 ALERT_EMAIL="admin@company.com" AVAILABILITY_ZONE="ap-northeast-2a" AWS_REGION="ap-northeast-2"  cdk deploy
 ```
 
-### Configuration
-Before deployment, update the configuration in `bin/202506-dh-failover-stepfunction.ts`:
-- `alertEmail`: Your email address for notifications
-- `availabilityZone`: Target availability zone
-- `instanceType`: Instance type for reserved hosts
-- `dedicatedHostIds`: (Optional) Specific host IDs to monitor
-
 ## Security Best Practices
 
 ### 1. Principle of Least Privilege
@@ -417,45 +410,6 @@ Use different IAM policies for different environments:
 - **Development**: Broader permissions for experimentation
 - **Staging**: Moderate restrictions for testing
 - **Production**: Strict least-privilege policies
-
-## Troubleshooting Common Permission Issues
-
-### 1. CloudFormation Access Denied
-```
-Error: User is not authorized to perform: cloudformation:CreateStack
-```
-**Solution**: Ensure CloudFormation permissions are attached
-
-### 2. S3 Bucket Access Issues
-```
-Error: Access Denied when uploading CDK assets
-```
-**Solution**: Verify S3 permissions for CDK asset buckets
-
-### 3. IAM Role Creation Failures
-```
-Error: User is not authorized to perform: iam:CreateRole
-```
-**Solution**: Add IAM permissions or use IAMFullAccess managed policy
-
-### 4. Lambda Function Deployment Issues
-```
-Error: User is not authorized to perform: lambda:CreateFunction
-```
-**Solution**: Ensure Lambda permissions are included
-
-## Support and Maintenance
-
-### Regular Tasks
-1. **Review permissions quarterly** to ensure they're still needed
-2. **Monitor CloudTrail logs** for permission usage patterns
-3. **Update policies** when adding new features
-4. **Test deployments** in non-production environments first
-
-### Getting Help
-- **AWS Documentation**: [CDK IAM Permissions](https://docs.aws.amazon.com/cdk/latest/guide/permissions.html)
-- **AWS Support**: For complex permission issues
-- **CDK GitHub**: For CDK-specific problems
 
 ## Conclusion
 
