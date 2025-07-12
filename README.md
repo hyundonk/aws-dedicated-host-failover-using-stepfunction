@@ -61,6 +61,245 @@ For detailed information about enhanced features, see [ENHANCED_FEATURES.md](./E
    - Sends notifications about the migration result with detailed statistics
 5. Successfully migrated hosts are automatically removed from the queue
 
+## Enhanced Workflow Logic
+
+### Proactive Health Checking
+The system now includes intelligent health checking using **Zabbix Agent monitoring** before proceeding with failover:
+
+1. **Health Check Execution**: Uses SSM Run Command to execute PowerShell scripts on Windows instances
+2. **Zabbix Agent Verification**: Checks service status and port 10050 listening state
+3. **Conservative Decision Logic**: Proceeds with failover **only if ALL instances are unhealthy**
+4. **False Alarm Prevention**: Skips unnecessary migrations when instances are actually healthy
+
+### Health Check Decision Matrix
+- **All instances healthy**: Skip migration, send healthy notification
+- **Some instances healthy**: Skip migration (conservative approach)
+- **All instances unhealthy**: Proceed with full migration
+- **Health check errors**: Proceed with migration (fail-safe)
+
+### Healthy Notification Management
+To prevent duplicate notifications for the same host:
+
+#### First Execution (Notification Not Sent):
+```
+MarkHostHealthy → CheckHealthyNotificationSent → SendHealthyNotification → UpdateHealthyNotificationSent → HealthyExit
+```
+
+#### Subsequent Executions (Notification Already Sent):
+```
+MarkHostHealthy → CheckHealthyNotificationSent → HealthyExit (SKIP notification)
+```
+
+### Enhanced DynamoDB Schema with Notification Tracking
+
+#### Before Healthy Notification:
+```json
+{
+  "hostId": "h-0b792777f81cafb12",
+  "state": "healthy",
+  "timestamp": "2025-07-11T06:00:00Z",
+  "healthCheckResults": {
+    "totalInstances": 3,
+    "healthyInstances": 3,
+    "checkTimestamp": "2025-07-11T06:00:00Z"
+  }
+}
+```
+
+#### After Healthy Notification:
+```json
+{
+  "hostId": "h-0b792777f81cafb12", 
+  "state": "healthy",
+  "timestamp": "2025-07-11T06:00:00Z",
+  "healthCheckResults": {
+    "totalInstances": 3,
+    "healthyInstances": 3,
+    "checkTimestamp": "2025-07-11T06:00:00Z"
+  },
+  "HealthyNotificationSent": true,
+  "HealthyNotificationTimestamp": "2025-07-11T06:00:15Z"
+}
+```
+
+#### Migration Completion Record:
+```json
+{
+  "hostId": "h-0b792777f81cafb12",
+  "state": "complete",
+  "timestamp": "2025-07-11T06:30:00Z",
+  "completedTime": "2025-07-11T06:30:00Z",
+  "expirationTime": "2025-07-18T06:30:00Z",
+  "migrationSummary": {
+    "totalInstances": 3,
+    "successfulMigrations": 3,
+    "failedMigrations": 0,
+    "targetHostId": "h-0fedcba0987654321"
+  },
+  "instanceMigrations": {
+    "i-1111111111111111": {
+      "status": "success",
+      "startTime": "2025-07-11T06:15:00Z",
+      "endTime": "2025-07-11T06:18:00Z",
+      "retryCount": 0
+    }
+  }
+}
+```
+
+### State Transition Flow
+The `state` field in DynamoDB tracks the complete lifecycle:
+
+```
+[Initial] → processing → [Health Check Decision] → healthy/complete/failed
+```
+
+- **processing**: Migration actively running
+- **healthy**: False alarm detected, no migration needed
+- **complete**: Migration successful with TTL for cleanup
+- **failed**: Migration failed, manual intervention may be needed
+
+## Intelligent Re-evaluation and Notification Management
+
+### Design Intention
+
+The system implements an intelligent approach to handle repeated CloudWatch alarms while preventing notification spam and ensuring continuous health monitoring. The core principle is to **allow health re-evaluation on every alarm while preventing duplicate notifications** for the same health status.
+
+### Key Design Principles
+
+#### **1. Continuous Health Monitoring**
+- **Every alarm triggers fresh evaluation**: Each CloudWatch alarm initiates a new health check regardless of previous results
+- **Current status assessment**: Always evaluates the present health condition of instances
+- **No blocking of health checks**: Previous healthy status doesn't prevent new assessments
+
+#### **2. Smart Notification Management**
+- **One notification per health state**: Healthy notifications are sent only once per host
+- **Persistent flag approach**: `HealthyNotificationSent` flag remains `true` across multiple evaluations
+- **Spam prevention**: Eliminates duplicate "instances are healthy" emails
+
+#### **3. Appropriate Failover Response**
+- **Failover when needed**: When health actually degrades, migration proceeds with proper notifications
+- **Conservative approach**: Only migrates when ALL instances are confirmed unhealthy
+- **Separate notification streams**: Migration notifications are independent of healthy notifications
+
+### Implementation Architecture
+
+#### **AlarmHandler Re-evaluation Logic**
+```javascript
+if (existingItem.HealthyNotificationSent === true) {
+  // Allow re-evaluation - health status may have changed since last check
+  // Start new workflow execution to assess current conditions
+}
+```
+
+#### **Notification Deduplication Logic**
+```javascript
+if (migrationRecord.HealthyNotificationSent === true) {
+  // Skip healthy notification - already informed administrators
+  // Proceed directly to HealthyExit
+}
+```
+
+### Workflow Behavior Scenarios
+
+#### **Scenario 1: Repeated Alarms with Consistently Healthy Instances**
+```
+1st Alarm: No record → Health check → Instances healthy → Send notification → Set flag=true
+2nd Alarm: Flag=true → Allow re-evaluation → Health check → Instances healthy → Skip notification
+3rd Alarm: Flag=true → Allow re-evaluation → Health check → Instances healthy → Skip notification
+...
+```
+**Outcome**: Continuous monitoring with single notification
+
+#### **Scenario 2: Health Status Degradation**
+```
+Previous: Flag=true (instances were healthy)
+New Alarm: Allow re-evaluation → Health check → Instances unhealthy → Proceed with failover
+```
+**Outcome**: Appropriate migration with migration-specific notifications
+
+#### **Scenario 3: Intermittent Issues**
+```
+Alarm 1: Healthy → Notification sent → Flag=true
+Alarm 2: Still healthy → No notification (flag prevents spam)
+Alarm 3: Now unhealthy → Migration proceeds → Migration notifications sent
+```
+**Outcome**: System responds appropriately to actual degradation
+
+### Benefits of This Design
+
+#### **✅ Operational Efficiency**
+- **Reduced notification noise**: Administrators receive relevant alerts only
+- **Continuous vigilance**: Every alarm triggers health assessment
+- **Cost optimization**: Prevents unnecessary migrations while maintaining monitoring
+
+#### **✅ System Reliability**
+- **No false negatives**: Health degradation is always detected and acted upon
+- **No race conditions**: Flag-based approach prevents concurrent execution conflicts
+- **Audit trail**: Complete history of health assessments and decisions
+
+#### **✅ User Experience**
+- **Clear communication**: Single healthy notification per host state
+- **Actionable alerts**: Migration notifications contain detailed failure information
+- **Predictable behavior**: Consistent response to alarm patterns
+
+### DynamoDB State Management
+
+#### **Healthy State with Notification Flag**
+```json
+{
+  "hostId": "h-0123456789abcdef0",
+  "state": "healthy",
+  "HealthyNotificationSent": true,
+  "HealthyNotificationTimestamp": "2025-07-11T06:00:15Z",
+  "healthCheckResults": {
+    "totalInstances": 3,
+    "healthyInstances": 3,
+    "checkTimestamp": "2025-07-11T06:00:00Z"
+  }
+}
+```
+
+#### **Processing State (During Re-evaluation)**
+```json
+{
+  "hostId": "h-0123456789abcdef0",
+  "state": "processing",
+  "HealthyNotificationSent": true,  // Preserved from previous evaluation
+  "timestamp": "2025-07-11T07:00:00Z"
+}
+```
+
+### Monitoring and Troubleshooting
+
+#### **Expected Log Patterns**
+
+**For Re-evaluation (No Notification):**
+```
+Host h-001a380d750b70915 has HealthyNotificationSent=true, allowing re-evaluation
+Previous health check may be outdated, starting new workflow execution
+Health check analysis: some-instances-healthy
+CheckHealthyNotificationSent: alreadySent = true, reason = notification-already-sent
+Workflow: HealthyExit (no notification sent)
+```
+
+**For Actual Failover:**
+```
+Host h-001a380d750b70915 has HealthyNotificationSent=true, allowing re-evaluation
+Health check analysis: all-instances-unhealthy
+Workflow: Proceeding with migration (bypasses healthy notification check)
+Migration notifications: Detailed failure and recovery information sent
+```
+
+### Configuration Considerations
+
+- **Alarm sensitivity**: Configure CloudWatch alarms appropriately to balance responsiveness with noise
+- **Health check criteria**: Zabbix Agent service running and port 10050 listening
+- **Conservative failover**: ALL instances must be unhealthy to trigger migration
+- **Notification channels**: Separate SNS topics for healthy vs. migration notifications
+
+This design ensures that the system remains vigilant and responsive while providing a clean, spam-free notification experience for operations teams.
+
 ## Deployment
 
 ### Prerequisites

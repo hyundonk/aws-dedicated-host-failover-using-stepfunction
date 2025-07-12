@@ -137,17 +137,75 @@ export class EC2HostFailoverStack extends cdk.Stack {
       handler: 'index.handler',
     });
 
+    const handleProvisionFailureFunction = new lambda.Function(this, 'HandleProvisionFailureFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/handle-provision-failure')),
+      handler: 'index.handler',
+    });
+
+    const handleMigrationFailureFunction = new lambda.Function(this, 'HandleMigrationFailureFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/handle-migration-failure')),
+      handler: 'index.handler',
+    });
+
+    const handleMigrationSuccessFunction = new lambda.Function(this, 'HandleMigrationSuccessFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/handle-migration-success')),
+      handler: 'index.handler',
+    });
+
+    const handleNoInstancesFunction = new lambda.Function(this, 'HandleNoInstancesFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/handle-no-instances')),
+      handler: 'index.handler',
+    });
+
+    const checkInstancesHealthFunction = new lambda.Function(this, 'CheckInstancesHealthFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/check-instances-health')),
+      handler: 'index.handler',
+      timeout: cdk.Duration.minutes(5), // Longer timeout for SSM operations
+    });
+
+    const markHostHealthyFunction = new lambda.Function(this, 'MarkHostHealthyFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/mark-host-healthy')),
+      handler: 'index.handler',
+    });
+
+    const checkHealthyNotificationSentFunction = new lambda.Function(this, 'CheckHealthyNotificationSentFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/check-healthy-notification-sent')),
+      handler: 'index.handler',
+    });
+
+    const updateHealthyNotificationSentFunction = new lambda.Function(this, 'UpdateHealthyNotificationSentFunction', {
+      ...lambdaConfig,
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/update-healthy-notification-sent')),
+      handler: 'index.handler',
+    });
+
     // Grant permissions
     queueTable.grantReadWriteData(initializeFunction);
     queueTable.grantReadWriteData(updateStatusFunction);
     queueTable.grantReadWriteData(updateInstanceMigrationStatusFunction);
     queueTable.grantReadWriteData(getInstancesFunction);
+    queueTable.grantReadWriteData(handleProvisionFailureFunction);
+    queueTable.grantReadWriteData(handleMigrationFailureFunction);
+    queueTable.grantReadWriteData(handleMigrationSuccessFunction);
+    queueTable.grantReadWriteData(handleNoInstancesFunction);
+    queueTable.grantReadWriteData(checkInstancesHealthFunction);
+    queueTable.grantReadWriteData(markHostHealthyFunction);
+    queueTable.grantReadData(checkHealthyNotificationSentFunction);
+    queueTable.grantWriteData(updateHealthyNotificationSentFunction);
     queueTable.grantReadData(getMigrationStatusFunction);
     queueTable.grantReadData(prepareDetailedNotificationFunction);
     queueTable.grantReadData(sendStepNotificationFunction);
     alertTopic.grantPublish(initializeFunction);
     alertTopic.grantPublish(updateStatusFunction);
     alertTopic.grantPublish(sendStepNotificationFunction);
+    alertTopic.grantPublish(markHostHealthyFunction);
 
     // EC2 permissions
     const ec2Policy = new iam.PolicyStatement({
@@ -165,7 +223,22 @@ export class EC2HostFailoverStack extends cdk.Stack {
     });
 
     checkReservedHostFunction.addToRolePolicy(ec2Policy);
+    initializeFunction.addToRolePolicy(ec2Policy); // Add EC2 permissions for merged functionality
     provisionReservedHostFunction.addToRolePolicy(ec2Policy);
+    checkInstancesHealthFunction.addToRolePolicy(ec2Policy);
+
+    // Add SSM permissions for health check function
+    const ssmPolicy = new iam.PolicyStatement({
+      actions: [
+        'ssm:SendCommand',
+        'ssm:GetCommandInvocation',
+        'ssm:DescribeInstanceInformation',
+        'ssm:ListCommandInvocations'
+      ],
+      resources: ['*'],
+    });
+
+    checkInstancesHealthFunction.addToRolePolicy(ssmPolicy);
     getInstancesFunction.addToRolePolicy(ec2Policy);
     stopInstanceFunction.addToRolePolicy(ec2Policy);
     checkInstanceStateFunction.addToRolePolicy(ec2Policy);
@@ -189,6 +262,10 @@ export class EC2HostFailoverStack extends cdk.Stack {
     const stateMachine = new stepfunctions.StateMachine(this, 'HostMigrationStateMachine', {
       definitionBody: stepfunctions.DefinitionBody.fromFile(path.join(__dirname, 'step-functions/migration-workflow.json')),
       definitionSubstitutions: {
+        CheckInstancesHealthFunction: checkInstancesHealthFunction.functionArn,
+        MarkHostHealthyFunction: markHostHealthyFunction.functionArn,
+        CheckHealthyNotificationSentFunction: checkHealthyNotificationSentFunction.functionArn,
+        UpdateHealthyNotificationSentFunction: updateHealthyNotificationSentFunction.functionArn,
         InitializeMigrationFunction: initializeFunction.functionArn,
         CheckReservedHostFunction: checkReservedHostFunction.functionArn,
         ProvisionReservedHostFunction: provisionReservedHostFunction.functionArn,
@@ -201,6 +278,10 @@ export class EC2HostFailoverStack extends cdk.Stack {
         UpdateInstanceMigrationStatusFunction: updateInstanceMigrationStatusFunction.functionArn,
         PrepareDetailedNotificationFunction: prepareDetailedNotificationFunction.functionArn,
         SendStepNotificationFunction: sendStepNotificationFunction.functionArn,
+        HandleProvisionFailureFunction: handleProvisionFailureFunction.functionArn,
+        HandleMigrationFailureFunction: handleMigrationFailureFunction.functionArn,
+        HandleMigrationSuccessFunction: handleMigrationSuccessFunction.functionArn,
+        HandleNoInstancesFunction: handleNoInstancesFunction.functionArn,
         RemoveReservedTagFunction: removeReservedTagFunction.functionArn,
         AlertTopicArn: alertTopic.topicArn,
         AvailabilityZone: props.availabilityZone,
@@ -223,8 +304,36 @@ export class EC2HostFailoverStack extends cdk.Stack {
     updateInstanceMigrationStatusFunction.grantInvoke(stateMachine);
     prepareDetailedNotificationFunction.grantInvoke(stateMachine);
     sendStepNotificationFunction.grantInvoke(stateMachine);
+    handleProvisionFailureFunction.grantInvoke(stateMachine);
+    handleMigrationFailureFunction.grantInvoke(stateMachine);
+    handleMigrationSuccessFunction.grantInvoke(stateMachine);
+    handleNoInstancesFunction.grantInvoke(stateMachine);
+    checkInstancesHealthFunction.grantInvoke(stateMachine);
+    markHostHealthyFunction.grantInvoke(stateMachine);
+    checkHealthyNotificationSentFunction.grantInvoke(stateMachine);
+    updateHealthyNotificationSentFunction.grantInvoke(stateMachine);
     removeReservedTagFunction.grantInvoke(stateMachine);
     
+    handleMigrationSuccessFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ec2:CreateTags',
+        'ec2:DeleteTags',
+        'ec2:DescribeTags'
+      ],
+      resources: ['*']
+    }));
+
+    getInstancesFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ec2:CreateTags',
+        'ec2:DeleteTags',
+        'ec2:DescribeTags'
+      ],
+      resources: ['*']
+    }));
+
     // Grant the Step Function permission to publish to the SNS topic
     alertTopic.grantPublish(stateMachine);
 

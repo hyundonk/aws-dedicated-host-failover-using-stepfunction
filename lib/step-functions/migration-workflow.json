@@ -1,10 +1,114 @@
 {
-  "Comment": "EC2 Dedicated Host Migration Workflow with Enhanced Instance Tracking",
-  "StartAt": "InitializeMigration",
+  "Comment": "EC2 Dedicated Host Migration Workflow with Health Check and Enhanced Instance Tracking",
+  "StartAt": "CheckInstancesHealth",
   "States": {
+    "CheckInstancesHealth": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "PROACTIVE HEALTH CHECK: Executes Zabbix Agent health checks on Windows instances via SSM Run Command. Checks service status and port 10050 listening state. Returns continueFailover=true ONLY if ALL instances are unhealthy (service not running or port not listening), false if ANY instance is healthy (service running and port listening). This conservative approach prevents failover unless every instance has confirmed Zabbix Agent issues.",
+      "Parameters": {
+        "FunctionName": "${CheckInstancesHealthFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId"
+        }
+      },
+      "ResultPath": "$.healthCheckResult",
+      "Next": "EvaluateHealthCheckResults",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.healthCheckError",
+          "Next": "InitializeMigration"
+        }
+      ]
+    },
+    "EvaluateHealthCheckResults": {
+      "Type": "Choice",
+      "Comment": "HEALTH CHECK DECISION POINT: Evaluates health check results to determine workflow path. If continueFailover=false (instances healthy), skips migration and marks host as healthy. If continueFailover=true (instances unhealthy/unknown), proceeds with full migration workflow. This is the key decision point that saves costs by avoiding unnecessary migrations.",
+      "Choices": [
+        {
+          "Variable": "$.healthCheckResult.Payload.continueFailover",
+          "BooleanEquals": false,
+          "Next": "MarkHostHealthy"
+        }
+      ],
+      "Default": "InitializeMigration"
+    },
+    "MarkHostHealthy": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "HEALTHY HOST PROCESSING: Updates DynamoDB to mark the host as healthy when health checks pass. Records that no migration was needed, preventing future unnecessary alarms. This step is reached when instances are determined to be functioning properly despite the original CloudWatch alarm.",
+      "Parameters": {
+        "FunctionName": "${MarkHostHealthyFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId",
+          "healthySummary.$": "$.healthCheckResult.Payload.healthySummary",
+          "instanceResults.$": "$.healthCheckResult.Payload.instanceResults"
+        }
+      },
+      "ResultPath": "$.healthyResult",
+      "Next": "CheckHealthyNotificationSent"
+    },
+    "CheckHealthyNotificationSent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "HEALTHY NOTIFICATION CHECK: Checks if healthy notification was already sent for this host to prevent duplicate notifications. If already sent, skips to HealthyExit directly.",
+      "Parameters": {
+        "FunctionName": "${CheckHealthyNotificationSentFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId"
+        }
+      },
+      "ResultPath": "$.notificationCheckResult",
+      "Next": "IsHealthyNotificationAlreadySent"
+    },
+    "IsHealthyNotificationAlreadySent": {
+      "Type": "Choice",
+      "Comment": "NOTIFICATION DUPLICATION PREVENTION: Routes workflow based on whether healthy notification was already sent. If sent, goes directly to HealthyExit. If not sent, proceeds with notification.",
+      "Choices": [
+        {
+          "Variable": "$.notificationCheckResult.Payload.alreadySent",
+          "BooleanEquals": true,
+          "Next": "HealthyExit"
+        }
+      ],
+      "Default": "SendHealthyNotification"
+    },
+    "SendHealthyNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Comment": "HEALTHY NOTIFICATION: Sends email notification that instances are healthy and no failover was needed. Includes health check details and statistics. This informs administrators that the original alarm was likely a false positive and no action was taken.",
+      "Parameters": {
+        "TopicArn": "${AlertTopicArn}",
+        "Subject.$": "$.healthyResult.Payload.notification.subject",
+        "Message.$": "$.healthyResult.Payload.notification.message"
+      },
+      "ResultPath": null,
+      "Next": "UpdateHealthyNotificationSent"
+    },
+    "UpdateHealthyNotificationSent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "HEALTHY NOTIFICATION TRACKING: Updates DynamoDB to mark that healthy notification has been sent for this host, preventing duplicate notifications in future executions.",
+      "Parameters": {
+        "FunctionName": "${UpdateHealthyNotificationSentFunction}",
+        "Payload": {
+          "hostId.$": "$.hostId"
+        }
+      },
+      "ResultPath": "$.updateNotificationResult",
+      "Next": "HealthyExit"
+    },
+    "HealthyExit": {
+      "Type": "Succeed",
+      "Comment": "WORKFLOW SUCCESS - NO MIGRATION: Successful completion when instances are healthy. No migration performed, no costs incurred, no service disruption. This represents the optimal outcome where proactive health checking prevented an unnecessary failover operation."
+    },
     "InitializeMigration": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "MIGRATION INITIALIZATION: Sets up the migration process by updating host status to 'processing', analyzing source host (AZ, instance family), checking for available reserved hosts with zero instances, and preparing migration started notification. This is the entry point for actual migration workflow after health checks fail or error.",
       "Parameters": {
         "FunctionName": "${InitializeMigrationFunction}",
         "Payload": {
@@ -12,99 +116,147 @@
         }
       },
       "ResultPath": "$.initResult",
-      "Next": "SendMigrationStartedNotification"
-    },
-    "SendMigrationStartedNotification": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${SendStepNotificationFunction}",
-        "Payload": {
-          "hostId.$": "$.hostId",
-          "step": "migration_started"
-        }
-      },
-      "ResultPath": "$.notificationResult",
-      "Next": "CheckReservedHostAvailability",
-      "Catch": [
-        {
-          "ErrorEquals": ["States.ALL"],
-          "ResultPath": "$.notificationError",
-          "Next": "CheckReservedHostAvailability"
-        }
-      ]
-    },
-    "CheckReservedHostAvailability": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${CheckReservedHostFunction}",
-        "Payload": {
-          "hostId.$": "$.hostId"
-        }
-      },
-      "ResultPath": "$.reservedHostResult",
       "Next": "IsReservedHostAvailable"
     },
     "IsReservedHostAvailable": {
       "Type": "Choice",
+      "Comment": "RESERVED HOST AVAILABILITY CHECK: Determines migration path based on reserved host availability. If available reserved host found with zero instances, uses existing host (cost-effective). If no available host, provisions new one. This decision point optimizes resource utilization and costs.",
       "Choices": [
         {
-          "Variable": "$.reservedHostResult.Payload.isAvailable",
-          "BooleanEquals": true,
-          "Next": "GetInstancesOnFailingHost"
+          "And": [
+            {
+              "Variable": "$.initResult.Payload.reservedHostCheck.isAvailable",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.initResult.Payload.reservedHostCheck.isAvailable",
+              "BooleanEquals": true
+            }
+          ],
+          "Next": "DetermineReservedHostIdDirect"
         }
       ],
-      "Default": "ProvisionReservedHost"
+      "Default": "InitializeRetryCounter"
+    },
+    "DetermineReservedHostIdDirect": {
+      "Type": "Pass",
+      "Comment": "RESERVED HOST ID RESOLUTION: Extracts the reserved host ID from the initial availability check and prepares it for the migration process. This ensures the workflow uses the pre-validated available reserved host.",
+      "Parameters": {
+        "hostId.$": "$.hostId",
+        "initResult.$": "$.initResult",
+        "targetReservedHostId.$": "$.initResult.Payload.reservedHostCheck.reservedHostId"
+      },
+      "Next": "GetInstancesOnFailingHost"
+    },
+    "InitializeRetryCounter": {
+      "Type": "Pass",
+      "Comment": "RETRY COUNTER INITIALIZATION: Sets up retry counter for dedicated host provisioning. Starts at 0 and will increment with each failed provisioning attempt up to 180 retries with 10-second intervals for resilient provisioning.",
+      "Parameters": {
+        "hostId.$": "$.hostId",
+        "initResult.$": "$.initResult",
+        "retryAttempt": 0
+      },
+      "Next": "ProvisionReservedHost"
     },
     "ProvisionReservedHost": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "DEDICATED HOST PROVISIONING: Provisions a new dedicated host when no available reserved host exists. Uses dynamic AZ and instance family from source host analysis. Supports up to 180 retry attempts with exponential backoff for resilient provisioning against capacity constraints.",
       "Parameters": {
         "FunctionName": "${ProvisionReservedHostFunction}",
         "Payload": {
           "hostId.$": "$.hostId",
-          "availabilityZone": "${AvailabilityZone}",
-          "instanceType": "${InstanceType}"
+          "availabilityZone.$": "$.initResult.Payload.availabilityZone",
+          "instanceFamily.$": "$.initResult.Payload.instanceFamily",
+          "retryAttempt.$": "$.retryAttempt"
         }
       },
       "ResultPath": "$.provisionResult",
       "Next": "SendProvisionNotification",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
-          "ResultPath": "$.error",
-          "Next": "HandleProvisionFailure"
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.provisionError",
+          "Next": "SendProvisionRetryNotification"
         }
       ]
+    },
+    "SendProvisionRetryNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Comment": "PROVISION RETRY NOTIFICATION: Sends immediate notification when dedicated host provisioning fails, informing administrators of retry attempts. Includes retry count, error details, and next steps. Helps with monitoring provisioning issues in real-time.",
+      "Parameters": {
+        "TopicArn": "${AlertTopicArn}",
+        "Subject": "EC2 Dedicated Host Failover - Provision Retry Attempt",
+        "Message.$": "States.Format('\u26a0\ufe0f PROVISION RETRY NOTIFICATION\n\nDedicated host provisioning failed for host {}. Retrying in 10 seconds...\n\n\ud83d\udccb RETRY DETAILS:\n\u2022 Source Host: {}\n\u2022 Retry Attempt: {}\n\u2022 Max Attempts: 180\n\u2022 Wait Time: 10 seconds\n\u2022 Error: {}\n\n\ud83d\udd04 The system will automatically retry provisioning. You will receive notifications for each retry attempt.\n\nFor real-time status, check the AWS Step Functions console.', $.hostId, $.hostId, States.MathAdd($.retryAttempt, 1), $.provisionError.Cause)"
+      },
+      "ResultPath": null,
+      "Next": "PreserveStateAfterRetryNotification",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PreserveStateAfterRetryNotification"
+        }
+      ]
+    },
+    "PreserveStateAfterRetryNotification": {
+      "Type": "Pass",
+      "Comment": "STATE PRESERVATION: Ensures workflow state is preserved after SNS notification to prevent data loss. SNS publish operations can overwrite state, so this step maintains all necessary data for retry logic continuation.",
+      "Parameters": {
+        "hostId.$": "$.hostId",
+        "initResult.$": "$.initResult",
+        "provisionError.$": "$.provisionError",
+        "retryAttempt.$": "$.retryAttempt"
+      },
+      "Next": "IncrementRetryCounter"
+    },
+    "IncrementRetryCounter": {
+      "Type": "Pass",
+      "Comment": "RETRY COUNTER INCREMENT: Increments the retry attempt counter for tracking provisioning attempts. Used to enforce retry limits and provide accurate retry statistics in notifications.",
+      "Parameters": {
+        "hostId.$": "$.hostId",
+        "initResult.$": "$.initResult",
+        "provisionError.$": "$.provisionError",
+        "retryAttempt.$": "States.MathAdd($.retryAttempt, 1)"
+      },
+      "Next": "CheckRetryLimit"
+    },
+    "CheckRetryLimit": {
+      "Type": "Choice",
+      "Comment": "RETRY LIMIT ENFORCEMENT: Checks if retry limit (180 attempts) has been reached. If under limit, waits 10 seconds and retries provisioning. If limit exceeded, handles permanent provisioning failure with detailed error reporting.",
+      "Choices": [
+        {
+          "Variable": "$.retryAttempt",
+          "NumericLessThan": 180,
+          "Next": "WaitBeforeRetry"
+        }
+      ],
+      "Default": "HandleProvisionFailure"
+    },
+    "WaitBeforeRetry": {
+      "Type": "Wait",
+      "Comment": "RETRY DELAY: 10-second wait between provisioning retry attempts to avoid overwhelming AWS APIs and allow for capacity availability changes. Provides time for transient issues to resolve.",
+      "Seconds": 10,
+      "Next": "ProvisionReservedHost"
     },
     "HandleProvisionFailure": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "FunctionName": "${UpdateStatusFunction}",
+        "FunctionName": "${HandleProvisionFailureFunction}",
         "Payload": {
           "hostId.$": "$.hostId",
-          "status": "failed",
-          "error.$": "$.error"
-        }
-      },
-      "ResultPath": "$.updateResult",
-      "Next": "PrepareProvisionFailureMessage"
-    },
-    "PrepareProvisionFailureMessage": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${PrepareDetailedNotificationFunction}",
-        "Payload": {
-          "hostId.$": "$.hostId",
-          "notificationType": "failure",
-          "errorMessage": "Failed to provision a reserved host for failover. Please check the logs for more details."
+          "error.$": "$.provisionError",
+          "totalRetryAttempts.$": "$.retryAttempt"
         }
       },
       "ResultPath": "$.notificationResult",
-      "Next": "SendFailureNotification"
+      "Next": "SendFailureNotification",
+      "Comment": "PROVISION FAILURE HANDLER: Handles permanent provisioning failure after 180 retry attempts. Updates DynamoDB status, prepares detailed failure notification with retry statistics, and sends comprehensive error report to administrators."
     },
     "SendProvisionNotification": {
       "Type": "Task",
@@ -113,6 +265,19 @@
         "TopicArn": "${AlertTopicArn}",
         "Subject": "EC2 Dedicated Host Failover - New Host Provisioned",
         "Message.$": "States.Format('Provisioned new reserved host {} for failover of {}', $.provisionResult.Payload.reservedHostId, $.hostId)"
+      },
+      "ResultPath": null,
+      "Next": "DetermineReservedHostId",
+      "Comment": "PROVISION SUCCESS NOTIFICATION: Sends notification when dedicated host provisioning succeeds. Includes new host details and next steps. Informs administrators that provisioning completed and migration will proceed."
+    },
+    "DetermineReservedHostId": {
+      "Type": "Pass",
+      "Comment": "Determine the correct reserved host ID from available sources",
+      "Parameters": {
+        "hostId.$": "$.hostId",
+        "initResult.$": "$.initResult",
+        "provisionResult.$": "$.provisionResult",
+        "targetReservedHostId.$": "$.provisionResult.Payload.reservedHostId"
       },
       "Next": "GetInstancesOnFailingHost"
     },
@@ -123,11 +288,12 @@
         "FunctionName": "${GetInstancesFunction}",
         "Payload": {
           "hostId.$": "$.hostId",
-          "reservedHostId.$": "$.reservedHostResult.Payload.reservedHostId"
+          "reservedHostId.$": "$.targetReservedHostId"
         }
       },
       "ResultPath": "$.instances",
-      "Next": "CheckInstancesExist"
+      "Next": "CheckInstancesExist",
+      "Comment": "INSTANCE DISCOVERY & TAG REMOVAL: Gets all instances on the failing dedicated host, removes 'Reserved' tag from target host immediately to prevent race conditions with other executions, and initializes migration tracking in DynamoDB."
     },
     "CheckInstancesExist": {
       "Type": "Choice",
@@ -138,7 +304,8 @@
           "Next": "SendInstancesFoundNotification"
         }
       ],
-      "Default": "NoInstancesToMigrate"
+      "Default": "HandleNoInstances",
+      "Comment": "INSTANCE EXISTENCE CHECK: Determines if there are instances to migrate. If instances found, proceeds with migration. If no instances, handles the no-migration scenario with appropriate notifications."
     },
     "SendInstancesFoundNotification": {
       "Type": "Task",
@@ -155,48 +322,39 @@
       "Next": "PrepareInstanceMigration",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.notificationError",
           "Next": "PrepareInstanceMigration"
         }
-      ]
+      ],
+      "Comment": "INSTANCES FOUND NOTIFICATION: Notifies that instances were found and migration will proceed. Provides instance count and migration timeline information to administrators."
     },
-    "NoInstancesToMigrate": {
+    "HandleNoInstances": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "FunctionName": "${UpdateStatusFunction}",
+        "FunctionName": "${HandleNoInstancesFunction}",
         "Payload": {
-          "hostId.$": "$.hostId",
-          "status": "complete"
-        }
-      },
-      "ResultPath": "$.updateResult",
-      "Next": "SendNoInstancesNotification"
-    },
-    "SendNoInstancesNotification": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${PrepareDetailedNotificationFunction}",
-        "Payload": {
-          "hostId.$": "$.hostId",
-          "notificationType": "success",
-          "customMessage.$": "States.Format('No instances found on dedicated host {}. Migration completed successfully with no instances to migrate.', $.hostId)"
+          "hostId.$": "$.hostId"
         }
       },
       "ResultPath": "$.notificationResult",
-      "Next": "SendNoInstancesNotificationSNS"
+      "Next": "SendNoInstancesNotificationSNS",
+      "Comment": "NO INSTANCES HANDLER: Handles scenario where no instances exist on the failing host. Updates status to complete, prepares detailed notification explaining the situation, and provides recommendations for unused hosts."
     },
     "SendNoInstancesNotificationSNS": {
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
         "TopicArn": "${AlertTopicArn}",
-        "Subject": "EC2 Dedicated Host Failover - No Instances to Migrate",
+        "Subject.$": "$.notificationResult.Payload.subject",
         "Message.$": "$.notificationResult.Payload.message"
       },
-      "Next": "MigrationComplete"
+      "ResultPath": null,
+      "Next": "MigrationComplete",
+      "Comment": "NO INSTANCES NOTIFICATION: Sends notification that no instances were found to migrate. Explains the situation and provides recommendations for host management and monitoring adjustments."
     },
     "PrepareInstanceMigration": {
       "Type": "Pass",
@@ -208,7 +366,8 @@
         "hostId.$": "$.hostId"
       },
       "ResultPath": "$.migrationState",
-      "Next": "InstanceMigrationIterator"
+      "Next": "InstanceMigrationIterator",
+      "Comment": "MIGRATION PREPARATION: Initializes instance migration iterator with total instance count, empty failed instances array, and migration state. Sets up the loop structure for processing each instance individually."
     },
     "InstanceMigrationIterator": {
       "Type": "Choice",
@@ -219,7 +378,8 @@
           "Next": "CheckIndexAgainstTotal"
         }
       ],
-      "Default": "EvaluateMigrationResults"
+      "Default": "EvaluateMigrationResults",
+      "Comment": "INSTANCE MIGRATION LOOP: Iterates through each instance for migration. Processes instances one by one, tracking progress and handling individual instance failures while maintaining overall migration state."
     },
     "CheckIndexAgainstTotal": {
       "Type": "Choice",
@@ -230,7 +390,8 @@
           "Next": "ExtractCurrentInstanceId"
         }
       ],
-      "Default": "EvaluateMigrationResults"
+      "Default": "EvaluateMigrationResults",
+      "Comment": "MIGRATION PROGRESS CHECK: Compares current migration index against total instance count to determine if more instances need processing. Controls the migration loop continuation logic."
     },
     "ExtractCurrentInstanceId": {
       "Type": "Pass",
@@ -239,7 +400,8 @@
         "forceStop": false
       },
       "ResultPath": "$.currentInstance",
-      "Next": "UpdateInstanceStatusToInProgress"
+      "Next": "UpdateInstanceStatusToInProgress",
+      "Comment": "CURRENT INSTANCE ID EXTRACTION: Extracts the specific instance ID from the instance list using the current index. Prepares the instance identifier for migration processing."
     },
     "UpdateInstanceStatusToInProgress": {
       "Type": "Task",
@@ -253,7 +415,8 @@
         }
       },
       "ResultPath": "$.instanceStatusUpdate",
-      "Next": "SendInstanceStoppingNotification"
+      "Next": "SendInstanceStoppingNotification",
+      "Comment": "INSTANCE STATUS UPDATE - IN PROGRESS: Updates DynamoDB to mark the current instance migration status as 'in-progress' with start timestamp. Provides detailed tracking of individual instance migration progress."
     },
     "SendInstanceStoppingNotification": {
       "Type": "Task",
@@ -274,11 +437,14 @@
       "Next": "StopInstance",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.notificationError",
           "Next": "StopInstance"
         }
-      ]
+      ],
+      "Comment": "INSTANCE STOPPING NOTIFICATION: Sends notification that instance stop operation is beginning. Provides real-time updates on migration progress to administrators."
     },
     "StopInstance": {
       "Type": "Task",
@@ -295,7 +461,9 @@
       "Next": "InitializeStopCounter",
       "Retry": [
         {
-          "ErrorEquals": ["InstanceStopError"],
+          "ErrorEquals": [
+            "InstanceStopError"
+          ],
           "IntervalSeconds": 30,
           "MaxAttempts": 3,
           "BackoffRate": 1.5
@@ -303,11 +471,14 @@
       ],
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.error",
           "Next": "HandleInstanceMigrationFailure"
         }
-      ]
+      ],
+      "Comment": "INSTANCE STOP OPERATION: Stops the current instance in preparation for migration. Uses force stop if previous attempts failed. Critical step for safe instance migration between dedicated hosts."
     },
     "InitializeStopCounter": {
       "Type": "Pass",
@@ -316,12 +487,14 @@
         "forceStopApplied": false
       },
       "ResultPath": "$.stopCheckCounter",
-      "Next": "WaitForInstanceToStop"
+      "Next": "WaitForInstanceToStop",
+      "Comment": "STOP COUNTER INITIALIZATION: Initializes the retry counter for instance stop operations. Sets up tracking for stop attempts and force stop logic."
     },
     "WaitForInstanceToStop": {
       "Type": "Wait",
       "Seconds": 30,
-      "Next": "CheckInstanceStopped"
+      "Next": "CheckInstanceStopped",
+      "Comment": "INSTANCE STOP WAIT PERIOD: Waits for the instance to transition to stopped state. Provides time for graceful shutdown before verification."
     },
     "CheckInstanceStopped": {
       "Type": "Task",
@@ -335,7 +508,8 @@
         }
       },
       "ResultPath": "$.instanceState",
-      "Next": "IsInstanceStopped"
+      "Next": "IsInstanceStopped",
+      "Comment": "INSTANCE STOP STATE CHECK: Verifies if the instance has successfully stopped by checking its current state. Determines if stop operation completed successfully."
     },
     "IsInstanceStopped": {
       "Type": "Choice",
@@ -346,32 +520,29 @@
           "Next": "SendInstanceStoppedNotification"
         }
       ],
-      "Default": "IncrementStopCounter"
+      "Default": "IncrementStopCounter",
+      "Comment": "INSTANCE STOP VERIFICATION: Checks if instance has successfully stopped. If stopped, proceeds with placement modification. If not stopped, increments retry counter and continues waiting."
     },
     "SendInstanceStoppedNotification": {
       "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
+      "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
-        "FunctionName": "${SendStepNotificationFunction}",
-        "Payload": {
-          "hostId.$": "$.migrationState.hostId",
-          "instanceId.$": "$.currentInstance.instanceId",
-          "reservedHostId.$": "$.migrationState.reservedHostId",
-          "step": "instance_stopped",
-          "additionalInfo": {
-            "forceStopUsed.$": "$.stopCheckCounter.forceStopApplied"
-          }
-        }
+        "TopicArn": "${AlertTopicArn}",
+        "Subject": "EC2 Dedicated Host Failover - Instance Stopped",
+        "Message.$": "States.Format('Instance {} has been stopped for migration from host {} to host {}. Force stop used: {}', $.currentInstance.instanceId, $.migrationState.hostId, $.migrationState.reservedHostId, $.stopCheckCounter.forceStopApplied)"
       },
-      "ResultPath": "$.notificationResult",
+      "ResultPath": null,
       "Next": "ModifyInstancePlacement",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.notificationError",
           "Next": "ModifyInstancePlacement"
         }
-      ]
+      ],
+      "Comment": "INSTANCE STOPPED NOTIFICATION: Sends notification that instance has been successfully stopped for migration. Includes instance details and next steps in the migration process."
     },
     "IncrementStopCounter": {
       "Type": "Pass",
@@ -385,11 +556,11 @@
         "instanceState.$": "$.instanceState",
         "migrationState.$": "$.migrationState",
         "instances.$": "$.instances",
-        "initResult.$": "$.initResult",
-        "reservedHostResult.$": "$.reservedHostResult"
+        "initResult.$": "$.initResult"
       },
       "ResultPath": "$",
-      "Next": "CheckStopRetryCount"
+      "Next": "CheckStopRetryCount",
+      "Comment": "STOP RETRY COUNTER: Increments the counter for instance stop attempts. Tracks retry attempts and applies force stop after multiple failed attempts for reliable instance stopping."
     },
     "CheckStopRetryCount": {
       "Type": "Choice",
@@ -405,7 +576,8 @@
           "Next": "PrepareForceStop"
         }
       ],
-      "Default": "WaitForInstanceToStop"
+      "Default": "WaitForInstanceToStop",
+      "Comment": "STOP RETRY COUNT VERIFICATION: Checks the number of stop retry attempts to determine if force stop should be applied. Implements progressive retry logic."
     },
     "CheckForceStopRetryLimit": {
       "Type": "Choice",
@@ -416,7 +588,8 @@
           "Next": "HandleInstanceMigrationFailure"
         }
       ],
-      "Default": "WaitForInstanceToStop"
+      "Default": "WaitForInstanceToStop",
+      "Comment": "FORCE STOP RETRY LIMIT: Checks if force stop retry limit has been exceeded. Determines if instance stop operation should be considered failed."
     },
     "PrepareForceStop": {
       "Type": "Pass",
@@ -425,7 +598,8 @@
         "forceStop": true
       },
       "ResultPath": "$.currentInstance",
-      "Next": "UpdateForceStopFlag"
+      "Next": "UpdateForceStopFlag",
+      "Comment": "FORCE STOP PREPARATION: Prepares the instance for force stop operation when normal stop attempts fail. Sets up parameters for forceful instance termination."
     },
     "UpdateForceStopFlag": {
       "Type": "Pass",
@@ -434,7 +608,8 @@
         "forceStopApplied": true
       },
       "ResultPath": "$.stopCheckCounter",
-      "Next": "StopInstance"
+      "Next": "StopInstance",
+      "Comment": "FORCE STOP FLAG UPDATE: Updates the force stop flag to indicate that force stop will be used. Tracks the escalation to forceful stop methods."
     },
     "ModifyInstancePlacement": {
       "Type": "Task",
@@ -450,7 +625,9 @@
       "Next": "SendPlacementModifiedNotification",
       "Retry": [
         {
-          "ErrorEquals": ["PlacementError"],
+          "ErrorEquals": [
+            "PlacementError"
+          ],
           "IntervalSeconds": 10,
           "MaxAttempts": 3,
           "BackoffRate": 1.5
@@ -458,11 +635,14 @@
       ],
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.error",
           "Next": "HandleInstanceMigrationFailure"
         }
-      ]
+      ],
+      "Comment": "INSTANCE PLACEMENT MODIFICATION: Modifies the instance placement to move it from the failing dedicated host to the target reserved host. Critical operation that performs the actual migration."
     },
     "SendPlacementModifiedNotification": {
       "Type": "Task",
@@ -480,11 +660,14 @@
       "Next": "SendInstanceStartingNotification",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.notificationError",
           "Next": "SendInstanceStartingNotification"
         }
-      ]
+      ],
+      "Comment": "PLACEMENT MODIFICATION NOTIFICATION: Sends notification that instance placement has been successfully modified to the new dedicated host. Confirms the critical migration step completion."
     },
     "SendInstanceStartingNotification": {
       "Type": "Task",
@@ -502,11 +685,14 @@
       "Next": "StartInstance",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.notificationError",
           "Next": "StartInstance"
         }
-      ]
+      ],
+      "Comment": "INSTANCE STARTING NOTIFICATION: Sends notification that instance start operation is beginning on the new dedicated host. Provides migration progress updates."
     },
     "StartInstance": {
       "Type": "Task",
@@ -522,7 +708,9 @@
       "Next": "WaitForInstanceToStart",
       "Retry": [
         {
-          "ErrorEquals": ["InstanceStartError"],
+          "ErrorEquals": [
+            "InstanceStartError"
+          ],
           "IntervalSeconds": 30,
           "MaxAttempts": 3,
           "BackoffRate": 1.5
@@ -530,16 +718,20 @@
       ],
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.error",
           "Next": "HandleInstanceMigrationFailure"
         }
-      ]
+      ],
+      "Comment": "INSTANCE START OPERATION: Starts the instance on the new dedicated host after successful placement modification. Completes the migration process for the individual instance."
     },
     "WaitForInstanceToStart": {
       "Type": "Wait",
       "Seconds": 30,
-      "Next": "CheckInstanceStarted"
+      "Next": "CheckInstanceStarted",
+      "Comment": "INSTANCE START WAIT PERIOD: Waits for the instance to transition to running state on the new dedicated host. Allows time for instance initialization."
     },
     "CheckInstanceStarted": {
       "Type": "Task",
@@ -553,7 +745,8 @@
         }
       },
       "ResultPath": "$.instanceState",
-      "Next": "IsInstanceStarted"
+      "Next": "IsInstanceStarted",
+      "Comment": "INSTANCE START STATE CHECK: Verifies if the instance has successfully started on the new dedicated host by checking its current state."
     },
     "IsInstanceStarted": {
       "Type": "Choice",
@@ -564,7 +757,8 @@
           "Next": "SendInstanceStartedNotification"
         }
       ],
-      "Default": "WaitForInstanceToStart"
+      "Default": "WaitForInstanceToStart",
+      "Comment": "INSTANCE START VERIFICATION: Determines if the instance is running successfully on the new host. Routes to success or failure handling based on start status."
     },
     "SendInstanceStartedNotification": {
       "Type": "Task",
@@ -582,11 +776,14 @@
       "Next": "UpdateInstanceStatusToSuccess",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "ResultPath": "$.notificationError",
           "Next": "UpdateInstanceStatusToSuccess"
         }
-      ]
+      ],
+      "Comment": "INSTANCE STARTED NOTIFICATION: Sends notification that instance has successfully started on the new dedicated host. Confirms individual instance migration completion."
     },
     "UpdateInstanceStatusToSuccess": {
       "Type": "Task",
@@ -600,7 +797,8 @@
         }
       },
       "ResultPath": "$.instanceStatusUpdate",
-      "Next": "IncrementInstanceCounter"
+      "Next": "IncrementInstanceCounter",
+      "Comment": "INSTANCE STATUS UPDATE - SUCCESS: Updates DynamoDB to mark the current instance migration as 'success' with completion timestamp and statistics."
     },
     "HandleInstanceMigrationFailure": {
       "Type": "Task",
@@ -615,7 +813,8 @@
         }
       },
       "ResultPath": "$.instanceStatusUpdate",
-      "Next": "UpdateFailedInstancesList"
+      "Next": "UpdateFailedInstancesList",
+      "Comment": "INSTANCE MIGRATION FAILURE HANDLER: Handles individual instance migration failures by updating status, recording error details, and preparing for next instance or overall failure handling."
     },
     "UpdateFailedInstancesList": {
       "Type": "Pass",
@@ -628,7 +827,8 @@
         "failed": true
       },
       "ResultPath": "$.migrationState",
-      "Next": "IncrementInstanceCounter"
+      "Next": "IncrementInstanceCounter",
+      "Comment": "FAILED INSTANCES LIST UPDATE: Adds the current instance to the failed instances list for overall migration result tracking and reporting."
     },
     "IncrementInstanceCounter": {
       "Type": "Pass",
@@ -641,7 +841,8 @@
         "failed": false
       },
       "ResultPath": "$.migrationState",
-      "Next": "InstanceMigrationIterator"
+      "Next": "InstanceMigrationIterator",
+      "Comment": "INSTANCE COUNTER INCREMENT: Increments the migration index counter to process the next instance in the migration queue. Maintains loop progression."
     },
     "EvaluateMigrationResults": {
       "Type": "Choice",
@@ -649,49 +850,25 @@
         {
           "Variable": "$.migrationState.failed",
           "BooleanEquals": true,
-          "Next": "MigrationPartiallyFailed"
+          "Next": "HandleMigrationFailure"
         }
       ],
-      "Default": "MigrationSuccessful"
+      "Default": "HandleMigrationSuccess",
+      "Comment": "MIGRATION RESULTS EVALUATION: Analyzes overall migration results to determine success or failure. Checks if any instances failed migration and routes to appropriate completion handler."
     },
-    "MigrationSuccessful": {
+    "HandleMigrationSuccess": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "FunctionName": "${UpdateStatusFunction}",
+        "FunctionName": "${HandleMigrationSuccessFunction}",
         "Payload": {
           "hostId.$": "$.hostId",
-          "status": "complete",
-          "expirationTime": true
-        }
-      },
-      "ResultPath": "$.updateResult",
-      "Next": "RemoveReservedTag"
-    },
-    "RemoveReservedTag": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${RemoveReservedTagFunction}",
-        "Payload": {
           "reservedHostId.$": "$.migrationState.reservedHostId"
         }
       },
-      "ResultPath": "$.tagRemovalResult",
-      "Next": "PrepareSuccessMessage"
-    },
-    "PrepareSuccessMessage": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${PrepareDetailedNotificationFunction}",
-        "Payload": {
-          "hostId.$": "$.hostId",
-          "notificationType": "success"
-        }
-      },
       "ResultPath": "$.notificationResult",
-      "Next": "SendSuccessNotification"
+      "Next": "SendSuccessNotification",
+      "Comment": "MIGRATION SUCCESS HANDLER: Handles successful migration completion by updating host status, preparing detailed success notification with statistics, and cleaning up migration state. Note: Reserved tag removal now handled earlier."
     },
     "SendSuccessNotification": {
       "Type": "Task",
@@ -701,34 +878,23 @@
         "Subject.$": "$.notificationResult.Payload.subject",
         "Message.$": "$.notificationResult.Payload.message"
       },
-      "Next": "MigrationComplete"
+      "ResultPath": null,
+      "Next": "MigrationComplete",
+      "Comment": "SUCCESS NOTIFICATION: Sends comprehensive success notification with migration statistics, timing information, and next steps. Confirms all instances successfully migrated to new dedicated host."
     },
-    "MigrationPartiallyFailed": {
+    "HandleMigrationFailure": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "FunctionName": "${UpdateStatusFunction}",
+        "FunctionName": "${HandleMigrationFailureFunction}",
         "Payload": {
           "hostId.$": "$.hostId",
-          "status": "failed"
-        }
-      },
-      "ResultPath": "$.updateResult",
-      "Next": "PrepareFailureMessage"
-    },
-    "PrepareFailureMessage": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${PrepareDetailedNotificationFunction}",
-        "Payload": {
-          "hostId.$": "$.hostId",
-          "notificationType": "partial",
           "failedInstances.$": "$.migrationState.failedInstances"
         }
       },
       "ResultPath": "$.notificationResult",
-      "Next": "SendFailureNotification"
+      "Next": "SendFailureNotification",
+      "Comment": "MIGRATION FAILURE HANDLER: Handles migration failures by updating host status, preparing detailed failure notification with error analysis, and providing troubleshooting guidance for failed instances."
     },
     "SendFailureNotification": {
       "Type": "Task",
@@ -738,10 +904,13 @@
         "Subject.$": "$.notificationResult.Payload.subject",
         "Message.$": "$.notificationResult.Payload.message"
       },
-      "Next": "MigrationComplete"
+      "ResultPath": null,
+      "Next": "MigrationComplete",
+      "Comment": "FAILURE NOTIFICATION: Sends detailed failure notification with error analysis, failed instance details, and recommended remediation actions. Provides comprehensive failure reporting."
     },
     "MigrationComplete": {
-      "Type": "Succeed"
+      "Type": "Succeed",
+      "Comment": "MIGRATION WORKFLOW COMPLETION: Final step indicating migration workflow completion. Reached after either successful migration or failure handling with appropriate notifications sent."
     }
   }
 }
