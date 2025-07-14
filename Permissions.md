@@ -237,6 +237,20 @@ For development environments, the simplest approach is to use AWS managed polici
 }
 ```
 
+### SSM Permissions (for CDK version updates)
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "ssm:GetParameter",
+    "ssm:PutParameter"
+  ],
+  "Resource": [
+    "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+  ]
+}
+```
+
 ## Complete Custom Policy for Production
 
 For production environments where you need more restrictive permissions, use this comprehensive policy:
@@ -311,6 +325,16 @@ For production environments where you need more restrictive permissions, use thi
       "Resource": [
         "arn:aws:s3:::cdk-*",
         "arn:aws:s3:::cdk-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:PutParameter"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
       ]
     }
   ]
